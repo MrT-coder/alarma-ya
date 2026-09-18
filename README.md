@@ -14,31 +14,62 @@ It is deliberately small. Three moving parts, one topic, two payloads.
 ## How it works
 
 ```
-   phone / browser                 HiveMQ Cloud                   hallway
- +------------------+           +--------------+        +---------------------+
- |  web/index.html  | wss:8884  |              | tls:8883|  ESP32 + relay      |
- |  publishes "ON"  |---------->|  MQTT broker |-------->|  subscribes, fires  |
- |            "OFF" |           |              |        |  the siren          |
- +------------------+           +--------------+        +---------------------+
-      publish-only                  topic:                   subscribe-only
-       credential              alarma-ya/comando               credential
+  PUBLISHERS                          BROKER                    SUBSCRIBER
+
+  web/index.html  --wss://host:8884--+
+  (any browser)                      |
+                                     +-->  HiveMQ Cloud  --ssl://host:8883-->  ESP32
+  phone shortcut  --ssl://host:8883--+     alarma-ya/comando                   + relay
+  (HTTP Shortcuts app)                        "ON" / "OFF"                     + siren
+
+  publish-only credential                                    subscribe-only credential
 ```
 
-The broker is the only thing both sides share, and it is the only thing that
+The broker is the only thing all three share, and it is the only thing that
 authenticates anybody. There is no backend of your own to write, deploy or keep
 alive — which also means there is nothing of your own to be breached.
 
-The two sides use different ports on the same broker, and mixing them up is the
-most common way to waste an afternoon here:
+Note that there is no privileged client here. The web panel is one publisher
+among several, not *the* app. Anything that can publish `ON` to
+`alarma-ya/comando` fires the siren, and that is exactly why a broker sits in
+the middle instead of a server of your own: adding a new way to trigger the
+alarm is adding a client, not deploying code.
 
-| Side | Port | Why |
+### How the three clients connect
+
+Same broker, same topic, three different ways in — and mixing up the ports is
+the most common way to waste an afternoon here.
+
+| Client | Endpoint | Transport |
 |---|---|---|
-| ESP32 | `8883` | raw MQTT over TLS |
-| Browser | `8884` | MQTT over WebSocket over TLS — browsers cannot speak raw MQTT/TCP |
+| ESP32 | `8883` | MQTT over TLS, raw TCP |
+| Phone shortcut | `ssl://host:8883` | MQTT over TLS, raw TCP |
+| Web panel | `wss://host:8884/mqtt` | MQTT over WebSocket over TLS |
+
+The browser is the odd one out, and not by choice: **a web page cannot open a
+raw TCP socket**, so MQTT has to be tunnelled through a WebSocket. That is the
+only reason port `8884` appears in this project at all. Everything else uses
+`8883`.
+
+Every connection is TLS. HiveMQ Cloud does not accept plaintext, so there is no
+unencrypted variant to fall back to or to forget to turn on.
+
+A few details of the device connection, since it is the one that has to stay up
+for years at a time:
+
+- **Client ID** is `alarma-ya-<efuse MAC>`, derived from the chip itself. Two
+  boards can never collide, and a collision would make the broker kick the older
+  session off on every reconnect — two devices fighting over one session, each
+  disconnecting the other, forever.
+- **Keepalive 60 s, socket timeout 30 s.** Both are raised from the library
+  defaults, which are tight enough that a slow TLS handshake reads as a dropped
+  connection.
+- **Clean session.** No offline queue, on purpose: a panic command that arrives
+  ten minutes late is worse than one that never arrives at all.
 
 ### The MQTT contract
 
-Everything the two halves agree on fits in four lines:
+Everything all three clients have to agree on fits in four lines:
 
 - **Topic:** `alarma-ya/comando`
 - **Payloads:** the literal strings `ON` and `OFF`. Nothing else is acted on.
@@ -50,20 +81,59 @@ Everything the two halves agree on fits in four lines:
   QoS 0, and MQTT silently downgrades to the lower of the two, so delivery today
   is effectively at-most-once.
 
-### Credentials: two accounts, not one
+---
 
-Create **two** credentials in HiveMQ, not one shared pair:
+## Setting up HiveMQ Cloud
 
-| Used by | Permission | If it leaks |
+You need a broker before any of this runs, and the free tier is more than a
+house needs. There is nothing to install and nothing to operate: you create a
+cluster, you create credentials, and that is the entire backend.
+
+### 1. Create the cluster
+
+Sign up at [hivemq.cloud](https://www.hivemq.com/mqtt-cloud-broker/) and create
+a free cluster. Once it is running, open **Cluster Details** and copy the
+**URL**. It looks like `something.s1.eu.hivemq.cloud`.
+
+Copy the **hostname only** — no `https://`, no `ssl://`, no port, no trailing
+slash. That one string goes into `MQTT_HOST` in `secrets.h`, into the *Broker*
+field of the web panel, and into the URL of the phone shortcut. All three
+clients point at the same place.
+
+### 2. Create the credentials
+
+Open the **Access Management** tab. A credential there is a username, a
+password, and a set of permissions — and each permission is a topic filter plus
+the activity it allows: publish, subscribe, or both.
+
+Create **two**, not one shared pair:
+
+| Suggested name | Permission | Topic filter | Goes into |
+|---|---|---|---|
+| `alarma-ya-device` | **Subscribe only** | `alarma-ya/comando` | `src/secrets.h` on the ESP32 |
+| `alarma-ya-trigger` | **Publish only** | `alarma-ya/comando` | web panel and phone shortcut, typed at runtime |
+
+That split is the actual security model of this project, so it is worth being
+precise about what each half buys you:
+
+| If this leaks | What someone can do | What they cannot do |
 |---|---|---|
-| ESP32 (`secrets.h`) | SUBSCRIBE on `alarma-ya/comando` | someone can read your commands, never send one |
-| Web panel (typed at runtime) | PUBLISH on `alarma-ya/comando` | someone can set off your siren, never listen in |
+| the device credential | read your commands | send one — the siren never sounds |
+| the trigger credential | set off your siren | listen to anything, read any topic |
 
-That split is the actual security model of this project. The web page runs in
+Neither one is a master key, and that is the whole point. The web page runs in
 the visitor's browser, so anything embedded in it is readable with *view
-source* — which is exactly why the page ships with no credential at all and asks
-for one at runtime. The containment is not secrecy, it is the permission
-attached to the account.
+source* — which is exactly why the page ships with no credential at all and
+asks for one at runtime. **The containment is not secrecy, it is the permission
+attached to the account.**
+
+Two things worth doing while you are in there:
+
+- Scope the topic filter to `alarma-ya/comando` exactly. A wildcard like `#` is
+  quicker to type and hands over the entire broker.
+- If more than one phone gets the trigger credential, create one credential per
+  device. Then losing a phone means revoking one credential, not re-pairing
+  everything you own.
 
 ---
 
@@ -260,9 +330,53 @@ instant. The broker is what validates them: a rejected CONNACK sends you back to
 the form instead of retrying a password that will never work.
 
 **One-tap triggering.** The page reads `?fire=on` from its own URL and fires as
-soon as the connection is up. Point an NFC tag or a phone shortcut at
+soon as the connection is up. Point an NFC tag at
 `https://your-host/index.html?fire=on` and the tap becomes the whole
 interaction. If the connection is not up yet, the request is held, not lost.
+
+---
+
+## Triggering it from your phone
+
+The panel needs a browser, a page load and a connection handshake before it can
+send anything. A dedicated MQTT client sitting on the home screen skips all of
+that, and for a panic button that difference is the whole feature.
+
+The setup in daily use here is [HTTP Shortcuts](https://github.com/Waboodoo/HTTP-Shortcuts),
+an open-source Android app that puts one-tap buttons on the home screen. The
+name is historical — it speaks MQTT natively, and that is what this uses. When
+you create the shortcut, pick the **MQTT** type, not an HTTP request.
+
+Make **two** shortcuts, one per command:
+
+| Field | ON shortcut | OFF shortcut |
+|---|---|---|
+| URL | `ssl://your-cluster.s1.eu.hivemq.cloud:8883` | same |
+| Topic | `alarma-ya/comando` | same |
+| Message | `ON` | `OFF` |
+| Username / password | the **publish-only** credential | same |
+
+Three things that will cost you an evening if you get them wrong:
+
+- **The scheme is `ssl://`**, not `mqtt://` and not `https://`. HiveMQ Cloud
+  accepts TLS only. A plaintext connection is refused outright rather than
+  silently downgraded, so the failure reads like a broken broker instead of a
+  wrong URL.
+- **Port `8883`, not `8884`.** The app speaks raw MQTT, so it uses the same
+  endpoint as the ESP32. `8884` is the WebSocket port and it exists only because
+  browsers cannot do anything else.
+- **Leave retain off.** A retained `ON` is replayed by the broker to every new
+  subscriber, so the siren would re-fire every single time the ESP32 reconnects.
+  The device carries a three second guard against exactly this, but that guard
+  is a backstop, not a licence to publish retained commands.
+
+Build the OFF shortcut at the same time as the ON one, not afterwards. A trigger
+with no matching stop leaves you waiting out the two minute auto-off standing
+next to a 130 dB horn.
+
+Only tested on Android. Any iOS app that can publish an MQTT message should work
+— the four fields above are all the information the broker needs — but nobody
+here has verified it, so it is written down as untested rather than as a claim.
 
 ---
 
