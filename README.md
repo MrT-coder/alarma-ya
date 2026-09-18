@@ -1,501 +1,519 @@
 # alarma-ya
 
-A panic button for a house.
+Un botón de pánico para una casa.
 
-You tap a button on your phone, a message crosses the internet, and a 130 dB
-siren goes off in the hallway. There is no app to install and no server to run:
-a web page publishes one MQTT message, an ESP32 sitting on the wall is
-subscribed to it, and a relay closes.
+Tocas un botón en el teléfono, un mensaje cruza internet y una sirena de 130 dB
+suena en el pasillo. No hay aplicación que instalar ni servidor que mantener: una
+página web publica un mensaje MQTT, un ESP32 montado en la pared está suscrito a
+él, y un relé cierra.
 
-It is deliberately small. Three moving parts, one topic, two payloads.
+Es deliberadamente pequeño. Tres piezas móviles, un tópico, dos mensajes.
 
 ---
 
-## How it works
+## Cómo funciona
 
 ```
-  PUBLISHERS                          BROKER                    SUBSCRIBER
+  PUBLICADORES                        BROKER                    SUSCRIPTOR
 
   web/index.html  --wss://host:8884--+
-  (any browser)                      |
+  (cualquier navegador)              |
                                      +-->  HiveMQ Cloud  --ssl://host:8883-->  ESP32
-  phone shortcut  --ssl://host:8883--+     alarma-ya/comando                   + relay
-  (HTTP Shortcuts app)                        "ON" / "OFF"                     + siren
+  atajo del teléfono --ssl://host:8883+     alarma-ya/comando                  + relé
+  (app HTTP Shortcuts)                        "ON" / "OFF"                     + sirena
 
-  publish-only credential                                    subscribe-only credential
+  credencial solo de publicación                    credencial solo de suscripción
 ```
 
-The broker is the only thing all three share, and it is the only thing that
-authenticates anybody. There is no backend of your own to write, deploy or keep
-alive — which also means there is nothing of your own to be breached.
+El broker es lo único que los tres comparten, y lo único que autentica a alguien.
+No hay un backend propio que escribir, desplegar ni mantener vivo — lo que
+también significa que no hay nada propio que puedan vulnerar.
 
-Note that there is no privileged client here. The web panel is one publisher
-among several, not *the* app. Anything that can publish `ON` to
-`alarma-ya/comando` fires the siren, and that is exactly why a broker sits in
-the middle instead of a server of your own: adding a new way to trigger the
-alarm is adding a client, not deploying code.
+Conviene notar que aquí no hay cliente privilegiado. El panel web es un publicador
+más, no *la* aplicación. Cualquier cosa capaz de publicar `ON` en
+`alarma-ya/comando` dispara la sirena, y ese es exactamente el motivo por el que
+hay un broker en el medio en lugar de un servidor propio: agregar una forma nueva
+de activar la alarma es agregar un cliente, no desplegar código.
 
-### How the three clients connect
+### Cómo se conecta cada uno de los tres clientes
 
-Same broker, same topic, three different ways in — and mixing up the ports is
-the most common way to waste an afternoon here.
+El mismo broker, el mismo tópico, tres formas distintas de entrar — y confundir
+los puertos es la manera más común de perder una tarde aquí.
 
-| Client | Endpoint | Transport |
+| Cliente | Punto de conexión | Transporte |
 |---|---|---|
-| ESP32 | `8883` | MQTT over TLS, raw TCP |
-| Phone shortcut | `ssl://host:8883` | MQTT over TLS, raw TCP |
-| Web panel | `wss://host:8884/mqtt` | MQTT over WebSocket over TLS |
+| ESP32 | `8883` | MQTT sobre TLS, TCP directo |
+| Atajo del teléfono | `ssl://host:8883` | MQTT sobre TLS, TCP directo |
+| Panel web | `wss://host:8884/mqtt` | MQTT sobre WebSocket sobre TLS |
 
-The browser is the odd one out, and not by choice: **a web page cannot open a
-raw TCP socket**, so MQTT has to be tunnelled through a WebSocket. That is the
-only reason port `8884` appears in this project at all. Everything else uses
-`8883`.
+El navegador es el caso distinto, y no por gusto: **una página web no puede abrir
+un socket TCP directo**, así que MQTT tiene que ir encapsulado en un WebSocket.
+Esa es la única razón por la que el puerto `8884` aparece en este proyecto. Todo
+lo demás usa el `8883`.
 
-Every connection is TLS. HiveMQ Cloud does not accept plaintext, so there is no
-unencrypted variant to fall back to or to forget to turn on.
+Todas las conexiones son TLS. HiveMQ Cloud no acepta texto plano, así que no
+existe una variante sin cifrar a la que caer por descuido ni que olvidar activar.
 
-The ESP32 also **verifies the broker's certificate**, against the root CA bundle
-that ships with the ESP32 core — the same trust list a browser carries.
-Encryption on its own would not be enough, and the reason is worth stating
-plainly: the credentials prove the *device* to HiveMQ, and certificate validation
-is the only thing that proves *HiveMQ* to the device. They point in opposite
-directions. Without the second one, anything able to redirect the traffic can
-present a certificate of its own, read the credentials straight out of the
-CONNECT packet, and from then on decide which commands the siren ever hears —
-including none at all, during a break-in, with the status light still reporting
-"armed".
+El ESP32 además **verifica el certificado del broker** contra el paquete de
+autoridades raíz que viene con el núcleo del ESP32 — la misma lista de confianza
+que carga un navegador. El cifrado por sí solo no alcanzaría, y vale la pena
+decir el motivo sin rodeos: las credenciales prueban el *dispositivo* ante
+HiveMQ, y la validación del certificado es lo único que prueba *HiveMQ* ante el
+dispositivo. Apuntan en direcciones opuestas. Sin la segunda, cualquier cosa
+capaz de desviar el tráfico puede presentar un certificado propio, leer las
+credenciales directamente del paquete CONNECT y, a partir de ahí, decidir qué
+órdenes escucha la sirena — incluida ninguna, durante un robo, con la luz de
+estado indicando «armado».
 
-**That validation needs a real clock**, and this is the part that catches people
-out. Checking a certificate includes asking whether today falls between its two
-dates, and a freshly booted ESP32 believes it is 1 January 1970 — which is
-before every certificate ever issued. So the firmware syncs time over NTP before
-its first handshake and refuses to attempt a connection until the clock is sane.
+**Esa validación necesita un reloj real**, y esta es la parte con la que casi
+todos tropiezan. Comprobar un certificado incluye preguntar si hoy cae entre sus
+dos fechas, y un ESP32 recién encendido cree que es 1 de enero de 1970 — anterior
+a cualquier certificado emitido. Por eso el firmware sincroniza la hora por NTP
+antes de su primer handshake y se niega a intentar la conexión hasta que el reloj
+sea creíble.
 
-Which means the device needs **outbound NTP (UDP 123)** on your network, not only
-MQTT. If the board sits on a slow blink forever and the serial log says the clock
-is not synced, that is a blocked port, not a broken broker.
+Lo que significa que el dispositivo necesita **NTP saliente (UDP 123)** en tu red,
+no solo MQTT. Si la placa se queda en parpadeo lento para siempre y el registro
+serie dice que el reloj no está sincronizado, eso es un puerto bloqueado, no un
+broker roto.
 
-A few details of the device connection, since it is the one that has to stay up
-for years at a time:
+Algunos detalles de la conexión del dispositivo, ya que es la que tiene que
+sostenerse durante años:
 
-- **Client ID** is `alarma-ya-<efuse MAC>`, derived from the chip itself. Two
-  boards can never collide, and a collision would make the broker kick the older
-  session off on every reconnect — two devices fighting over one session, each
-  disconnecting the other, forever.
-- **Keepalive 60 s, socket timeout 30 s.** Both are raised from the library
-  defaults, which are tight enough that a slow TLS handshake reads as a dropped
-  connection.
-- **Clean session.** No offline queue, on purpose: a panic command that arrives
-  ten minutes late is worse than one that never arrives at all.
+- **El identificador de cliente** es `alarma-ya-<MAC de efuse>`, derivado del
+  propio chip. Dos placas nunca pueden colisionar, y una colisión haría que el
+  broker expulse la sesión más vieja en cada reconexión — dos dispositivos
+  peleando por una sesión, desconectándose mutuamente, para siempre.
+- **Keepalive de 60 s, tiempo de espera de socket de 30 s.** Ambos están subidos
+  respecto a los valores por defecto de la biblioteca, que son lo bastante
+  ajustados como para que un handshake TLS lento se lea como una conexión caída.
+- **Sesión limpia.** Sin cola de mensajes pendientes, a propósito: una orden de
+  pánico que llega diez minutos tarde es peor que una que no llega nunca.
 
-### The MQTT contract
+### El contrato MQTT
 
-Everything all three clients have to agree on fits in four lines:
+Todo lo que los tres clientes tienen que acordar cabe en cuatro líneas:
 
-- **Topic:** `alarma-ya/comando`
-- **Payloads:** the literal strings `ON` and `OFF`. Nothing else is acted on.
-- **Retain:** must be `false`. A retained `ON` is replayed by the broker to every
-  new subscriber the moment it connects, so the siren would re-fire on every
-  single reconnect, forever. Retain is for state; this is a command, and a
-  command is an event that already happened.
-- **QoS:** the device subscribes at QoS 1. The panel currently publishes at
-  QoS 0, and MQTT silently downgrades to the lower of the two, so delivery today
-  is effectively at-most-once.
+- **Tópico:** `alarma-ya/comando`
+- **Mensajes:** las cadenas literales `ON` y `OFF`. No se actúa sobre ninguna otra.
+- **Retención:** tiene que ser `false`. Un `ON` retenido se lo reenvía el broker a
+  cada nuevo suscriptor en el instante en que se conecta, así que la sirena se
+  volvería a disparar en cada reconexión, para siempre. La retención es para
+  estado; esto es una orden, y una orden es un evento que ya ocurrió.
+- **QoS:** el dispositivo se suscribe con QoS 1. El panel publica hoy con QoS 0, y
+  MQTT degrada en silencio al menor de los dos, así que la entrega actual es, en
+  la práctica, como máximo una vez.
 
 ---
 
-## Setting up HiveMQ Cloud
+## Configurar HiveMQ Cloud
 
-You need a broker before any of this runs, and the free tier is more than a
-house needs. There is nothing to install and nothing to operate: you create a
-cluster, you create credentials, and that is the entire backend.
+Necesitas un broker antes de que nada de esto funcione, y el plan gratuito sobra
+para una casa. No hay nada que instalar ni que operar: creas un clúster, creas
+credenciales, y ese es todo el backend.
 
-### 1. Create the cluster
+### 1. Crear el clúster
 
-Sign up at [hivemq.cloud](https://www.hivemq.com/mqtt-cloud-broker/) and create
-a free cluster. Once it is running, open **Cluster Details** and copy the
-**URL**. It looks like `something.s1.eu.hivemq.cloud`.
+Regístrate en [hivemq.cloud](https://www.hivemq.com/mqtt-cloud-broker/) y crea un
+clúster gratuito. Cuando esté en marcha, abre **Cluster Details** y copia la
+**URL**. Tiene la forma `algo.s1.eu.hivemq.cloud`.
 
-Copy the **hostname only** — no `https://`, no `ssl://`, no port, no trailing
-slash. That one string goes into `MQTT_HOST` in `secrets.h`, into the *Broker*
-field of the web panel, and into the URL of the phone shortcut. All three
-clients point at the same place.
+Copia **solo el nombre de host** — sin `https://`, sin `ssl://`, sin puerto y sin
+barra final. Esa misma cadena va en `MQTT_HOST` dentro de `secrets.h`, en el campo
+*Broker* del panel web y en la URL del atajo del teléfono. Los tres clientes
+apuntan al mismo lugar.
 
-### 2. Create the credentials
+### 2. Crear las credenciales
 
-Open the **Access Management** tab. A credential there is a username, a
-password, and a set of permissions — and each permission is a topic filter plus
-the activity it allows: publish, subscribe, or both.
+Abre la pestaña **Access Management**. Una credencial ahí es un usuario, una
+contraseña y un conjunto de permisos — y cada permiso es un filtro de tópico más
+la actividad que habilita: publicar, suscribirse o ambas.
 
-Create **two**, not one shared pair:
+Crea **dos**, no un par compartido:
 
-| Suggested name | Permission | Topic filter | Goes into |
+| Nombre sugerido | Permiso | Filtro de tópico | Va en |
 |---|---|---|---|
-| `alarma-ya-device` | **Subscribe only** | `alarma-ya/comando` | `src/secrets.h` on the ESP32 |
-| `alarma-ya-trigger` | **Publish only** | `alarma-ya/comando` | web panel and phone shortcut, typed at runtime |
+| `alarma-ya-device` | **Solo suscripción** | `alarma-ya/comando` | `src/secrets.h` del ESP32 |
+| `alarma-ya-trigger` | **Solo publicación** | `alarma-ya/comando` | panel web y atajo del teléfono, escrita en tiempo de uso |
 
-That split is the actual security model of this project, so it is worth being
-precise about what each half buys you:
+Esa separación es el modelo de seguridad real de este proyecto, así que vale la
+pena ser preciso sobre qué te da cada mitad:
 
-| If this leaks | What someone can do | What they cannot do |
+| Si se filtra | Qué puede hacer alguien | Qué no puede hacer |
 |---|---|---|
-| the device credential | read your commands | send one — the siren never sounds |
-| the trigger credential | set off your siren | listen to anything, read any topic |
+| la credencial del dispositivo | leer tus órdenes | enviar una — la sirena nunca suena |
+| la credencial de disparo | hacer sonar tu sirena | escuchar nada, leer ningún tópico |
 
-Neither one is a master key, and that is the whole point. The web page runs in
-the visitor's browser, so anything embedded in it is readable with *view
-source* — which is exactly why the page ships with no credential at all and
-asks for one at runtime. **The containment is not secrecy, it is the permission
-attached to the account.**
+Ninguna de las dos es una llave maestra, y ese es todo el punto. La página web se
+ejecuta en el navegador del visitante, así que cualquier cosa incrustada en ella
+se puede leer con *ver código fuente* — que es exactamente el motivo por el que la
+página no trae ninguna credencial y la pide en tiempo de uso. **La contención no
+es el secreto, es el permiso asociado a la cuenta.**
 
-Two things worth doing while you are in there:
+Dos cosas que conviene hacer mientras estás ahí:
 
-- Scope the topic filter to `alarma-ya/comando` exactly. A wildcard like `#` is
-  quicker to type and hands over the entire broker.
-- If more than one phone gets the trigger credential, create one credential per
-  device. Then losing a phone means revoking one credential, not re-pairing
-  everything you own.
+- Acota el filtro de tópico a `alarma-ya/comando` exacto. Un comodín como `#` se
+  escribe más rápido y entrega el broker entero.
+- Si más de un teléfono recibe la credencial de disparo, crea una credencial por
+  dispositivo. Así perder un teléfono es revocar una credencial, y no volver a
+  emparejar todo lo que tienes.
 
 ---
 
 ## Hardware
 
-| Part | Spec | Notes |
+| Pieza | Especificación | Notas |
 |---|---|---|
-| ESP32 WROOM-32 devkit | 30 pins, GPIO at 3.3 V | ~250 mA, peaks near 400 mA on WiFi TX |
-| 2-channel relay module | SRD-05VDC-SL-C, 5 V coil, PC817 optocouplers, contacts 10 A @ 30 VDC | **active LOW** — see below |
-| Siren | 12 V DC, 20 W, 130 dB — 1.67 A nominal | |
-| 12 V supply | 2 A / 24 W | powers the siren only |
-| USB charger | 1 A | powers the ESP32 only |
-| Resistor | 10 kΩ | pull-up on GPIO26 — **mandatory** |
-| Diode | 1N4007 | flyback across the siren |
-| Wire | AWG 20 for the 12 V side | Dupont jumpers are AWG 26–28 and will not carry 1.67 A |
+| Devkit ESP32 WROOM-32 | 30 pines, GPIO a 3.3 V | ~250 mA, picos cercanos a 400 mA al transmitir por WiFi |
+| Módulo relé de 2 canales | SRD-05VDC-SL-C, bobina de 5 V, optoacopladores PC817, contactos 10 A a 30 VDC | **activo en BAJO** — ver más abajo |
+| Sirena | 12 V DC, 20 W, 130 dB — 1.67 A nominales | |
+| Fuente de 12 V | 2 A / 24 W | alimenta solo la sirena |
+| Cargador USB | 1 A | alimenta solo el ESP32 |
+| Resistencia | 10 kΩ | pull-up en GPIO26 — **obligatoria** |
+| Diodo | 1N4007 | flyback sobre la sirena |
+| Cable | AWG 20 para el lado de 12 V | los Dupont son AWG 26–28 y no soportan 1.67 A |
 
-### Two circuits, one meeting point
+### Dos circuitos, un único punto de encuentro
 
-This is the idea that makes the rest of the wiring obvious: **there is no single
-circuit here, there are two**, and the relay is the only place they touch.
+Esta es la idea que vuelve obvio todo el resto del cableado: **aquí no hay un
+circuito, hay dos**, y el relé es el único lugar donde se tocan.
 
-The logic side runs at 3.3 V and a few milliamps, all of it fed from the USB
-charger through the ESP32. The power side moves 1.67 A at 12 V and never comes
-near the board. Inside the relay the two meet without conducting: the
-optocoupler passes the command as *light*, and the contacts are metal that
-either touches or does not.
+El lado lógico trabaja a 3.3 V y unos pocos miliamperios, todo alimentado desde el
+cargador USB a través del ESP32. El lado de potencia mueve 1.67 A a 12 V y nunca
+se acerca a la placa. Dentro del relé los dos se encuentran sin conducirse: el
+optoacoplador pasa la orden convertida en *luz*, y los contactos son metal que se
+toca o no se toca.
 
-Do not power the ESP32 from the 12 V supply, and do not run the siren current
-through the board.
+No alimentes el ESP32 desde la fuente de 12 V, y no hagas pasar la corriente de la
+sirena por la placa.
 
-### Wiring
+### Cableado
 
-**Before anything else, pull the blue JD-VCC jumper off the relay module.**
+**Antes que nada, quita el jumper azul JD-VCC del módulo relé.**
 
-That jumper ties `VCC` to `JD-VCC`, feeding the optocoupler and the coil from
-one line. You need them separate, and here is why: the PC817's internal LED
-starts conducting around 1.2 V. Feed `VCC` with 5 V while the ESP32 drives `IN1`
-HIGH at 3.3 V, and 1.7 V still sits across that LED — the relay stays latched or
-behaves erratically. Put `VCC` on 3.3 V instead and a HIGH pin means zero volts
-across the LED, which is genuinely off. The coil keeps getting its 5 V through
-`JD-VCC`. Keep the jumper somewhere; do not throw it out.
+Ese jumper une `VCC` con `JD-VCC`, alimentando el optoacoplador y la bobina desde
+la misma línea. Los necesitas separados, y este es el motivo: el LED interno del
+PC817 empieza a conducir alrededor de 1.2 V. Si alimentas `VCC` con 5 V mientras
+el ESP32 pone `IN1` en ALTO a 3.3 V, quedan 1.7 V sobre ese LED — el relé se queda
+pegado o se comporta de forma errática. Pon `VCC` a 3.3 V y un pin en ALTO
+significa cero voltios sobre el LED, que es apagado de verdad. La bobina sigue
+recibiendo sus 5 V por `JD-VCC`. Guarda el jumper; no lo tires.
 
-Logic side:
+Lado lógico:
 
-| From | To | Why |
+| Desde | Hacia | Por qué |
 |---|---|---|
-| ESP32 `GPIO26` | relay `IN1` | the command. LOW fires. |
-| ESP32 `3V3` | relay `VCC` | optocoupler reference. 3.3 V, **never 5 V** |
-| ESP32 `GND` | relay `GND` (4-pin header) | logic ground |
-| ESP32 `GPIO26` | ESP32 `3V3`, through 10 kΩ | holds the pin HIGH while it floats during boot |
-| ESP32 `VIN` | relay `JD-VCC` | coil supply, ~72 mA. `VIN` is the USB 5 V rail. |
-| ESP32 `GND` | relay `GND` (3-pin header) | coil return |
+| ESP32 `GPIO26` | relé `IN1` | la orden. Nivel BAJO dispara. |
+| ESP32 `3V3` | relé `VCC` | referencia del optoacoplador. 3.3 V, **nunca 5 V** |
+| ESP32 `GND` | relé `GND` (header de 4 pines) | masa lógica |
+| ESP32 `GPIO26` | ESP32 `3V3`, a través de 10 kΩ | mantiene el pin en ALTO mientras flota durante el arranque |
+| ESP32 `VIN` | relé `JD-VCC` | alimentación de la bobina, ~72 mA. `VIN` es el riel de 5 V del USB. |
+| ESP32 `GND` | relé `GND` (header de 3 pines) | retorno de la bobina |
 
-Power side:
+Lado de potencia:
 
-| From | To | Cable |
+| Desde | Hacia | Cable |
 |---|---|---|
-| 12 V supply `+` | relay `COM` (CH1) | AWG 20 |
-| relay `NO` (CH1) | siren `+` | AWG 20 |
-| 12 V supply `−` | siren `−` | AWG 20 |
-| 1N4007 across the siren, **stripe to `+`** | | flyback |
+| Fuente de 12 V `+` | relé `COM` (CH1) | AWG 20 |
+| relé `NO` (CH1) | sirena `+` | AWG 20 |
+| Fuente de 12 V `−` | sirena `−` | AWG 20 |
+| 1N4007 sobre la sirena, **franja hacia `+`** | | flyback |
 
-`NO`, not `NC`. At rest the contact stays open and the siren stays quiet.
+`NO`, no `NC`. En reposo el contacto queda abierto y la sirena callada.
 
-ESP32 GPIO pins are **not 5 V tolerant** — the datasheet says so in those words.
-Putting 5 V on GPIO26 destroys it. That is the whole reason `VCC` goes to 3.3 V.
+Los pines GPIO del ESP32 **no toleran 5 V** — la hoja de datos lo dice con esas
+palabras. Meterle 5 V al GPIO26 lo destruye. Esa es toda la razón por la que `VCC`
+va a 3.3 V.
 
-### The relay is active LOW — and Wokwi is the opposite
+### El relé es activo en BAJO — y en Wokwi es al revés
 
-This is the single most important paragraph in this file.
+Este es el párrafo más importante de todo el archivo.
 
-Opto-isolated relay boards built on PC817 + SRD-05VDC close the contact when the
-input pin is pulled **LOW**, not HIGH. That was not deduced, it was measured on
-the bench with `src/relay_polarity.cpp`: the IN1 LED lights and the relay clicks
-while GPIO26 is LOW.
+Los módulos de relé opto-aislados construidos sobre PC817 + SRD-05VDC cierran el
+contacto cuando el pin de entrada se pone en **BAJO**, no en ALTO. Eso no se
+dedujo, se midió en el banco con `src/relay_polarity.cpp`: el LED de IN1 enciende
+y el relé hace clic mientras GPIO26 está en BAJO.
 
-So the firmware carries:
+Por eso el firmware lleva:
 
 ```c
 #define RELAY_ACTIVE_LOW 1
 ```
 
-**Wokwi's relay module is active HIGH.** If you simulate with this set to `1`,
-the logic reads inverted in the simulator. Flip it to `0` for Wokwi, and back to
-`1` before you flash real hardware.
+**El módulo relé de Wokwi es activo en ALTO.** Si simulas con esto en `1`, la
+lógica se lee invertida en el simulador. Cámbialo a `0` para Wokwi, y vuelve a
+ponerlo en `1` antes de grabar hardware real.
 
-Get this backwards on real hardware and the failure is not subtle: the siren
-starts screaming the instant the ESP32 is powered, and the `ON` command
-*silences* it. Everything inverted, at 130 dB.
+Si te equivocas en esto sobre hardware real, el fallo no es sutil: la sirena
+empieza a sonar en el instante en que se alimenta el ESP32, y la orden `ON` la
+*apaga*. Todo invertido, a 130 dB.
 
-And software alone does not cover it. Between the moment power arrives and the
-moment your first line of code runs, GPIO26 floats. That window belongs to the
-**10 kΩ pull-up**, which is why it is not optional.
+Y el software por sí solo no lo cubre. Entre el momento en que llega la
+alimentación y el momento en que corre tu primera línea de código, GPIO26 queda
+flotando. Esa ventana le corresponde al **pull-up de 10 kΩ**, y por eso no es
+opcional.
 
-### Checking the polarity yourself
+### Comprobar la polaridad tú mismo
 
-Do not take this file's word for it — your module may not be the same one. There
-is a second PlatformIO environment that does nothing but answer this question,
-with no WiFi and no MQTT in the way:
+No te fíes de lo que dice este archivo — tu módulo puede no ser el mismo. Hay un
+segundo entorno de PlatformIO que no hace más que responder esta pregunta, sin
+WiFi ni MQTT de por medio:
 
 ```bash
 pio run -e relay_polarity -t upload -t monitor
 ```
 
-Wire **only** the logic and coil side. No 12 V, no siren. The pin parks HIGH for
-10 seconds, then alternates LOW/HIGH every 3 seconds. Listen for the click and
-read the serial output: the line printed while the relay is closed tells you
-your active level.
+Conecta **solo** el lado lógico y el de la bobina. Sin 12 V y sin sirena. El pin
+queda en ALTO durante 10 segundos y después alterna BAJO/ALTO cada 3 segundos.
+Escucha el clic y lee la salida serie: la línea que se imprime mientras el relé
+está cerrado te dice cuál es tu nivel activo.
 
 ---
 
 ## Firmware
 
-### Configure `secrets.h`
+### Configurar `secrets.h`
 
-Everything that differs between installations lives in one gitignored file.
+Todo lo que cambia entre instalaciones vive en un único archivo ignorado por git.
 
 ```bash
 cp src/secrets.h.example src/secrets.h
 ```
 
-Then fill in:
+Después completa:
 
-| Define | What |
+| Definición | Qué es |
 |---|---|
-| `WIFI_AP1_SSID` / `WIFI_AP1_PASS` | your network. Slots 2 and 3 are optional — uncomment a pair to register it. |
-| `MQTT_HOST` | your HiveMQ cluster hostname. No scheme, no port, no trailing slash. |
-| `MQTT_USER` / `MQTT_PASS` | the subscribe-only credential |
+| `WIFI_AP1_SSID` / `WIFI_AP1_PASS` | tu red. Las ranuras 2 y 3 son opcionales — descomenta un par para registrarlo. |
+| `MQTT_HOST` | el nombre de host de tu clúster de HiveMQ. Sin esquema, sin puerto y sin barra final. |
+| `MQTT_USER` / `MQTT_PASS` | la credencial de solo suscripción |
 
-Two things that cost people hours:
+Dos cosas que le cuestan horas a mucha gente:
 
-- **The ESP32 radio is 2.4 GHz only.** A 5 GHz SSID will never associate, no
-  matter how correct the password is. If your router broadcasts both bands under
-  one name, the 2.4 GHz band still has to be enabled.
-- `WiFiMulti` picks a network **at connect time and does not roam**. It scans,
-  joins the strongest one it can actually see, and stays there until the link
-  drops. Multiple APs mean "this firmware boots in more than one place without a
-  reflash", not "it follows you around the house".
+- **La radio del ESP32 es solo de 2.4 GHz.** Un SSID de 5 GHz no va a asociarse
+  nunca, por más correcta que sea la contraseña. Si tu router emite ambas bandas
+  con el mismo nombre, la banda de 2.4 GHz igual tiene que estar habilitada.
+- `WiFiMulti` elige una red **en el momento de conectarse y no hace roaming**.
+  Escanea, se une a la más fuerte que realmente alcanza a ver, y se queda ahí
+  hasta que el enlace se cae. Tener varios puntos de acceso significa «este
+  firmware arranca en más de un lugar sin volver a grabarlo», no «te sigue por
+  toda la casa».
 
-`src/secrets.h` is gitignored. So is `.pio/`, because the compiled
-`firmware.bin` has your credentials baked into it.
+`src/secrets.h` está ignorado por git. `.pio/` también, porque el `firmware.bin`
+compilado lleva tus credenciales incrustadas.
 
-### Build and upload
+### Compilar y grabar
 
 ```bash
-pio run -e esp32dev                       # build
-pio run -e esp32dev -t upload             # build and flash
-pio run -e esp32dev -t upload -t monitor  # flash and watch the serial log at 115200
+pio run -e esp32dev                       # compilar
+pio run -e esp32dev -t upload             # compilar y grabar
+pio run -e esp32dev -t upload -t monitor  # grabar y ver el registro serie a 115200
 ```
 
-`esp32dev` is the default environment, so a plain `pio run` does the same thing.
-Only `src/main.cpp` is compiled into it — `build_src_filter` keeps the bench test
-out of the production build.
+`esp32dev` es el entorno por defecto, así que un `pio run` a secas hace lo mismo.
+Solo se compila `src/main.cpp` — `build_src_filter` deja la prueba de banco fuera
+de la compilación de producción.
 
-Use a **data** micro-USB cable. Charge-only cables do not enumerate a COM port,
-and the failure looks exactly like a dead board.
+Usa un cable micro-USB **de datos**. Los cables de solo carga no muestran ningún
+puerto COM, y el fallo se ve exactamente igual que una placa muerta.
 
 ---
 
-## The status LED
+## El LED de estado
 
-The onboard blue LED is the only local readout this thing has, so it is worth
-reading properly. Without it you cannot tell a booting board from an armed one,
-and an alarm nobody can confirm is armed is an alarm nobody trusts.
+El LED azul integrado es la única lectura local que tiene este aparato, así que
+vale la pena saber interpretarlo. Sin él no puedes distinguir una placa
+arrancando de una placa armada, y una alarma que nadie puede confirmar que está
+armada es una alarma en la que nadie confía.
 
-| Pattern | Meaning |
+| Patrón | Significado |
 |---|---|
-| **Fast blink** (~5 Hz) | looking for a WiFi network |
-| **Slow blink** (~1.2 Hz) | WiFi is up, the broker is not reachable |
-| **Brief pulse** every 3 s | connected, subscribed, **armed** |
-| **Solid on** | the siren is firing right now |
+| **Parpadeo rápido** (~5 Hz) | buscando una red WiFi |
+| **Parpadeo lento** (~1.2 Hz) | el WiFi está bien, el broker no responde |
+| **Pulso breve** cada 3 s | conectado, suscrito, **armado** |
+| **Encendido fijo** | la sirena está sonando ahora mismo |
 
-Firing outranks everything else: whatever the network is doing, a sounding horn
-is the fact you need first.
+El disparo tiene prioridad sobre todo lo demás: haga lo que haga la red, una
+bocina sonando es el dato que necesitas primero.
 
-The LED is painted by a hardware timer rather than by `loop()`, and that is a
-fix, not a flourish. `WiFiMulti::run()` blocks for roughly nine seconds while it
-scans and associates. Back when the pattern was repainted from `loop()`, a board
-that simply could not find its network repainted once every nine seconds — which
-reads as a **steady light**. On this device a steady light means the siren is
-firing. A board that was merely lost was reporting the most alarming state it
-has. A timer cannot be starved by a blocking call.
-
----
-
-## The web panel
-
-`web/index.html` is a single static file. No build step, nothing to install, no
-server. Open it from disk, or put it behind any static host.
-
-On first use it asks for three things — broker host, username, password — and,
-if you tick the box, remembers them in `localStorage` so the next tap is
-instant. The broker is what validates them: a rejected CONNACK sends you back to
-the form instead of retrying a password that will never work.
-
-**One-tap triggering.** The page reads `?fire=on` from its own URL and fires as
-soon as the connection is up. Point an NFC tag at
-`https://your-host/index.html?fire=on` and the tap becomes the whole
-interaction. If the connection is not up yet, the request is held, not lost.
+El LED lo pinta un temporizador por hardware y no el `loop()`, y eso es una
+corrección, no un adorno. `WiFiMulti::run()` bloquea unos nueve segundos mientras
+escanea y se asocia. Cuando el patrón se repintaba desde `loop()`, una placa que
+simplemente no encontraba su red se repintaba una vez cada nueve segundos — lo que
+se lee como una **luz fija**. En este dispositivo una luz fija significa que la
+sirena está sonando. Una placa que solo estaba perdida informaba el estado más
+alarmante que tiene. A un temporizador no lo puede dejar sin tiempo una llamada
+bloqueante.
 
 ---
 
-## Triggering it from your phone
+## El panel web
 
-The panel needs a browser, a page load and a connection handshake before it can
-send anything. A dedicated MQTT client sitting on the home screen skips all of
-that, and for a panic button that difference is the whole feature.
+`web/index.html` es un único archivo estático. Sin paso de compilación, sin nada
+que instalar, sin servidor. Ábrelo desde el disco, o publícalo en cualquier
+alojamiento estático.
 
-The setup in daily use here is [HTTP Shortcuts](https://github.com/Waboodoo/HTTP-Shortcuts),
-an open-source Android app that puts one-tap buttons on the home screen. The
-name is historical — it speaks MQTT natively, and that is what this uses. When
-you create the shortcut, pick the **MQTT** type, not an HTTP request.
+La primera vez pide tres cosas — host del broker, usuario y contraseña — y, si
+marcas la casilla, las recuerda en `localStorage` para que el siguiente toque sea
+inmediato. Quien las valida es el broker: un CONNACK rechazado te devuelve al
+formulario en lugar de reintentar con una contraseña que nunca va a funcionar.
 
-Make **two** shortcuts, one per command:
+**Disparo de un toque.** La página lee `?fire=on` de su propia URL y dispara en
+cuanto la conexión está lista. Apunta una etiqueta NFC a
+`https://tu-host/index.html?fire=on` y el toque pasa a ser toda la interacción. Si
+la conexión todavía no está lista, la petición se retiene, no se pierde.
 
-| Field | ON shortcut | OFF shortcut |
+---
+
+## Dispararlo desde el teléfono
+
+El panel necesita un navegador, una carga de página y un saludo de conexión antes
+de poder enviar nada. Un cliente MQTT dedicado en la pantalla de inicio se saltea
+todo eso, y para un botón de pánico esa diferencia lo es todo.
+
+Lo que está en uso diario aquí es
+[HTTP Shortcuts](https://github.com/Waboodoo/HTTP-Shortcuts), una aplicación
+Android de código abierto que pone botones de un toque en la pantalla de inicio.
+El nombre es histórico — habla MQTT de forma nativa, y es lo que se usa en esta
+instalación. Al crear el atajo, elige el tipo **MQTT**, no una petición HTTP.
+
+Crea **dos** atajos, uno por orden:
+
+| Campo | Atajo de ON | Atajo de OFF |
 |---|---|---|
-| URL | `ssl://your-cluster.s1.eu.hivemq.cloud:8883` | same |
-| Topic | `alarma-ya/comando` | same |
-| Message | `ON` | `OFF` |
-| Username / password | the **publish-only** credential | same |
+| URL | `ssl://tu-cluster.s1.eu.hivemq.cloud:8883` | igual |
+| Tópico | `alarma-ya/comando` | igual |
+| Mensaje | `ON` | `OFF` |
+| Usuario / contraseña | la credencial de **solo publicación** | igual |
 
-Three things that will cost you an evening if you get them wrong:
+Tres cosas que te van a costar una tarde si las equivocas:
 
-- **The scheme is `ssl://`**, not `mqtt://` and not `https://`. HiveMQ Cloud
-  accepts TLS only. A plaintext connection is refused outright rather than
-  silently downgraded, so the failure reads like a broken broker instead of a
-  wrong URL.
-- **Port `8883`, not `8884`.** The app speaks raw MQTT, so it uses the same
-  endpoint as the ESP32. `8884` is the WebSocket port and it exists only because
-  browsers cannot do anything else.
-- **Leave retain off.** A retained `ON` is replayed by the broker to every new
-  subscriber, so the siren would re-fire every single time the ESP32 reconnects.
-  The device carries a three second guard against exactly this, but that guard
-  is a backstop, not a licence to publish retained commands.
+- **El esquema es `ssl://`**, no `mqtt://` ni `https://`. HiveMQ Cloud acepta
+  únicamente TLS. Una conexión en texto plano se rechaza de plano en lugar de
+  degradarse en silencio, así que el fallo se lee como un broker roto y no como
+  una URL equivocada.
+- **Puerto `8883`, no `8884`.** La aplicación habla MQTT directo, así que usa el
+  mismo punto de conexión que el ESP32. El `8884` es el puerto de WebSocket y
+  existe solo porque los navegadores no pueden hacer otra cosa.
+- **Deja la retención apagada.** Un `ON` retenido se lo reenvía el broker a cada
+  nuevo suscriptor, así que la sirena se volvería a disparar cada vez que el ESP32
+  reconecta. El dispositivo lleva una protección de tres segundos justamente
+  contra esto, pero esa protección es una red de seguridad, no un permiso para
+  publicar órdenes retenidas.
 
-Build the OFF shortcut at the same time as the ON one, not afterwards. A trigger
-with no matching stop leaves you waiting out the two minute auto-off standing
-next to a 130 dB horn.
+Crea el atajo de OFF al mismo tiempo que el de ON, no después. Un disparador sin
+su parada correspondiente te deja esperando los dos minutos del apagado
+automático parado al lado de una bocina de 130 dB.
 
-Only tested on Android. Any iOS app that can publish an MQTT message should work
-— the four fields above are all the information the broker needs — but nobody
-here has verified it, so it is written down as untested rather than as a claim.
-
----
-
-## Safety
-
-Three independent guards, because a 130 dB horn earns them.
-
-**1. The siren cannot sound forever.** `SIREN_MAX_MS` is 2 minutes and it is
-enforced *on the device*, so it survives the WiFi, the broker and the phone all
-dying at once. Every `ON` restarts the countdown, which makes it a dead man's
-switch rather than a cap on the event: if the emergency is still going, tap
-again and the clock resets. The check runs at the top of `loop()`, before any
-network work, because a lost link is precisely the situation where the `OFF`
-will never arrive.
-
-**2. `OFF` is always honoured.** No grace window, no conditions. Refusing to stop
-is never the safe failure mode.
-
-**3. A retained `ON` cannot re-fire the siren.** The panel never sets retain, but
-the device does not trust the publisher: any `ON` arriving within 3 seconds of
-subscribing is treated as a broker replay and dropped.
-
-And in `setup()`, the safe level is written to the pin **before** `pinMode()`
-switches it to output. Do it the other way round and the pin spends a moment at
-its reset default — which is a free chirp out of a 130 dB horn.
-
-### Bringing it up for the first time
-
-In this order. Skipping steps here is how hardware dies.
-
-1. **Meter the 12 V supply before plugging anything into it.** Red probe to the
-   plug's centre pin, black to the outer ring. It must read **+12 V**. Generic
-   adapters lie on their labels, and reversed polarity destroys everything
-   downstream of them.
-2. **Confirm the relay polarity** with the `relay_polarity` environment above.
-3. **Fit the 10 kΩ pull-up** before any load is connected.
-4. **Test the contacts with something harmless** — a 12 V bulb, an LED with a
-   resistor, or just a multimeter in continuity. Confirm it opens and closes,
-   and confirm the `SIREN_MAX_MS` auto-off actually fires.
-5. **Only now, the siren** — with the 1N4007 already fitted, outdoors or with
-   hearing protection, and `SIREN_MAX_MS` set short. 130 dB in a closed room
-   causes damage in seconds.
+Probado solo en Android. Cualquier aplicación de iOS capaz de publicar un mensaje
+MQTT debería funcionar — los cuatro campos de arriba son toda la información que
+necesita el broker — pero nadie lo ha verificado aquí, así que queda escrito como
+no probado y no como una afirmación.
 
 ---
 
-## Simulating it
+## Seguridad
 
-`diagram.json` and `wokwi.toml` drive the Wokwi simulator against the real
-PlatformIO build (`.pio/build/esp32dev/firmware.*`), so you can exercise the
-MQTT logic, the reconnect path and the auto-off with no hardware on the desk.
+Tres protecciones independientes, porque una bocina de 130 dB se las gana.
 
-Two things to change before it will run:
+**1. La sirena no puede sonar para siempre.** `SIREN_MAX_MS` son 2 minutos y se
+aplica *en el dispositivo*, así que sobrevive a que el WiFi, el broker y el
+teléfono mueran a la vez. Cada `ON` reinicia la cuenta, lo que lo convierte en un
+interruptor de hombre muerto y no en un tope al evento: si la emergencia sigue,
+vuelves a tocar y el reloj se reinicia. La comprobación corre al principio del
+`loop()`, antes de cualquier trabajo de red, porque un enlace caído es
+precisamente la situación en la que el `OFF` no va a llegar nunca.
 
-- Put `Wokwi-GUEST` / `""` in `secrets.h` — that is the simulator's virtual
-  network.
-- Set `RELAY_ACTIVE_LOW` to `0`, because Wokwi's relay is active HIGH.
+**2. El `OFF` siempre se obedece.** Sin ventana de gracia y sin condiciones.
+Negarse a parar nunca es el modo de fallo seguro.
 
-Note that the NTP sync and the certificate validation apply in the simulator
-exactly as they do on hardware, and neither has been re-tested there since
-validation was turned on. If the simulated board never reaches the broker, check
-the clock line in the serial log before assuming anything else is wrong.
+**3. Un `ON` retenido no puede volver a disparar la sirena.** El panel nunca marca
+la retención, pero el dispositivo no confía en el publicador: cualquier `ON` que
+llegue dentro de los 3 segundos posteriores a suscribirse se trata como una
+repetición del broker y se descarta.
 
-Simulate what has **states**: firmware, protocol, reconnection. Calculate what
-has **numbers**: current, power, dissipation. Measure what has **tolerances**:
-the real supply, the real siren, the real relay. Wokwi answers the first
-question only, and no simulator will tell you whether your supply holds up.
+Y en `setup()`, el nivel seguro se escribe en el pin **antes** de que `pinMode()`
+lo convierta en salida. Al revés, el pin pasa un instante en su valor por defecto
+de arranque — que es un bocinazo gratis de 130 dB.
 
----
+### Ponerlo en marcha por primera vez
 
-## Known limitations
+En este orden. Saltarse pasos aquí es como se quema el hardware.
 
-Written down rather than hidden, because you are about to trust this thing.
-
-- **The panel stores its credential in `localStorage` in clear text.** Anyone
-  holding the unlocked device can read it. The blast radius is bounded by that
-  credential being publish-only, but it is a real trade and it was made on
-  purpose.
-- **Commands are effectively at-most-once — accepted, not overlooked.** The
-  device subscribes at QoS 1, every publisher sends at QoS 0, and MQTT downgrades
-  to the lower of the two. A QoS 0 publish is lost silently when the connection
-  is already dead but the client does not know it yet, and a phone handing over
-  between WiFi and mobile data is the realistic version of that. It is left as an
-  edge case on purpose: the Android shortcut app exposes no QoS setting at all,
-  so raising it on the web panel alone would make the two triggers behave
-  differently without making the one people actually use any more reliable.
-- **No delivery confirmation.** The panel reports that it published, not that the
-  siren sounded. There is no acknowledgement topic. Together with the point
-  above, treat a tap as a request rather than a guarantee — and confirm by ear.
-- **The device depends on NTP.** Certificate validation needs a real clock, so a
-  network that blocks outbound UDP 123 leaves the alarm permanently
-  disconnected.
+1. **Mide la fuente de 12 V antes de enchufarle nada.** Punta roja al pin central
+   del conector, negra al anillo exterior. Tiene que leer **+12 V**. Los
+   adaptadores genéricos mienten en sus etiquetas, y la polaridad invertida
+   destruye todo lo que tengan conectado.
+2. **Confirma la polaridad del relé** con el entorno `relay_polarity` de más
+   arriba.
+3. **Monta el pull-up de 10 kΩ** antes de conectar cualquier carga.
+4. **Prueba los contactos con algo inofensivo** — una lámpara de 12 V, un LED con
+   su resistencia, o simplemente el multímetro en continuidad. Confirma que abre y
+   cierra, y confirma que el apagado automático de `SIREN_MAX_MS` realmente se
+   dispara.
+5. **Recién ahora, la sirena** — con el 1N4007 ya montado, al aire libre o con
+   protección auditiva, y con `SIREN_MAX_MS` puesto en un valor corto. 130 dB en
+   una habitación cerrada causan daño en segundos.
 
 ---
 
-## License
+## Simularlo
 
-MIT — see [LICENSE](LICENSE).
+`diagram.json` y `wokwi.toml` hacen correr el simulador de Wokwi contra la
+compilación real de PlatformIO (`.pio/build/esp32dev/firmware.*`), así que puedes
+ejercitar la lógica MQTT, la reconexión y el apagado automático sin hardware sobre
+la mesa.
 
-Worth reading the last paragraph of it before you build one. This drives 12 V
-and a 130 dB siren, it is published AS IS with no warranty of any kind, and
-what you wire up is your responsibility.
+Dos cosas que cambiar antes de que funcione:
+
+- Pon `Wokwi-GUEST` / `""` en `secrets.h` — esa es la red virtual del simulador.
+- Pon `RELAY_ACTIVE_LOW` en `0`, porque el relé de Wokwi es activo en ALTO.
+
+Ten en cuenta que la sincronización NTP y la validación del certificado aplican en
+el simulador igual que en hardware, y ninguna de las dos se ha vuelto a probar ahí
+desde que se activó la validación. Si la placa simulada nunca alcanza el broker,
+revisa la línea del reloj en el registro serie antes de suponer que el problema
+está en otra parte.
+
+Simula lo que tiene **estados**: firmware, protocolo, reconexión. Calcula lo que
+tiene **números**: corriente, potencia, disipación. Mide lo que tiene
+**tolerancias**: la fuente real, la sirena real, el relé real. Wokwi responde solo
+la primera pregunta, y ningún simulador te va a decir si tu fuente aguanta.
+
+---
+
+## Limitaciones conocidas
+
+Escritas en lugar de escondidas, porque estás a punto de confiar en este aparato.
+
+- **El panel guarda su credencial en `localStorage` en texto plano.** Cualquiera
+  con el dispositivo desbloqueado puede leerla. El alcance del daño está acotado
+  por que esa credencial sea de solo publicación, pero es un intercambio real y se
+  tomó a conciencia.
+- **Las órdenes se entregan como máximo una vez — asumido, no pasado por alto.** El
+  dispositivo se suscribe con QoS 1, todos los publicadores envían con QoS 0, y
+  MQTT degrada al menor de los dos. Una publicación con QoS 0 se pierde en
+  silencio cuando la conexión ya está muerta pero el cliente todavía no lo sabe, y
+  un teléfono cambiando entre WiFi y datos móviles es la versión realista de eso.
+  Se deja como caso extremo a propósito: la aplicación de atajos de Android no
+  expone ningún ajuste de QoS, así que subirlo solo en el panel web haría que los
+  dos disparadores se comportaran distinto sin volver más fiable al que la gente
+  realmente usa.
+- **No hay confirmación de entrega.** El panel informa que publicó, no que la
+  sirena sonó. No existe un tópico de acuse de recibo. Junto con el punto
+  anterior, trata un toque como una petición y no como una garantía — y confirma
+  de oído.
+- **El dispositivo depende de NTP.** La validación del certificado necesita un
+  reloj real, así que una red que bloquee el UDP 123 saliente deja la alarma
+  permanentemente desconectada.
+
+---
+
+## Licencia
+
+MIT — ver [LICENSE](LICENSE). El texto de la licencia se conserva en inglés porque
+es la redacción canónica de MIT y traducirla le quitaría validez.
+
+Vale la pena leer su último párrafo antes de construir uno de estos. Esto maneja
+12 V y una sirena de 130 dB, se publica TAL CUAL, sin garantía de ningún tipo, y
+lo que conectes es tu responsabilidad.
