@@ -1,0 +1,22 @@
+# Line endings are decided here, in the repository, instead of by whatever each
+# contributor happens to have in their local git config.
+#
+# Without this, a Windows checkout can be saved back with CRLF and show up on
+# someone else's clone as every file modified, which turns a one-line change
+# into a full-file diff and makes review pointless.
+#
+# text=auto: git normalizes text files to LF when storing them, and converts on
+# checkout to whatever the platform expects.
+* text=auto
+
+# Belt and braces for anything that must never be touched by that conversion.
+# None of these are in the repository today, but wiring photos and datasheets
+# are the obvious thing to add later, and a corrupted binary is a confusing
+# failure to debug.
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.pdf  binary
+*.bin  binary
+*.elf  binary
