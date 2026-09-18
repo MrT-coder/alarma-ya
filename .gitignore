@@ -1,0 +1,17 @@
+# PlatformIO build output. The compiled firmware.bin embeds secrets.h, so this
+# directory must never be committed.
+.pio/
+
+# Real credentials: WiFi SSIDs/passwords and the HiveMQ device account.
+# Copy src/secrets.h.example to src/secrets.h and fill it in locally.
+src/secrets.h
+
+# Internal documentation, not part of the public project.
+docs/
+
+# Internal tooling state.
+.atl/
+
+# Editor configuration. PlatformIO regenerates it, and it contains absolute
+# machine paths.
+.vscode/
