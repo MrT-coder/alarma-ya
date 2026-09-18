@@ -1,0 +1,313 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+  <title>Alarma-Ya</title>
+
+  <!-- MQTT over WebSocket client. Browsers can't speak raw MQTT/TCP, only WebSocket. -->
+  <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+
+  <style>
+    :root { color-scheme: light dark; }
+    * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
+    body {
+      margin: 0; min-height: 100dvh; display: flex; flex-direction: column;
+      align-items: center; justify-content: center; gap: 1.5rem; padding: 1.5rem;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      background: #0f1115; color: #e8e8e8;
+    }
+    h1 { margin: 0; font-size: 1.4rem; letter-spacing: .04em; }
+    .status { display: flex; align-items: center; gap: .5rem; font-size: .9rem; opacity: .85; }
+    .dot { width: .7rem; height: .7rem; border-radius: 50%; background: #888; transition: background .2s; }
+    .dot.online { background: #2ecc71; box-shadow: 0 0 10px #2ecc71; }
+    .dot.offline { background: #e74c3c; }
+
+    button {
+      border: none; border-radius: 1rem; cursor: pointer; font-weight: 700;
+      transition: transform .05s ease, filter .15s ease;
+    }
+    button:active { transform: scale(.97); }
+    button:disabled { filter: grayscale(.7) brightness(.6); cursor: not-allowed; }
+
+    #fire {
+      width: min(80vw, 320px); height: min(80vw, 320px); border-radius: 50%;
+      font-size: 1.6rem; color: #fff; letter-spacing: .05em;
+      background: radial-gradient(circle at 50% 35%, #ff5b5b, #c0182b);
+      box-shadow: 0 0 40px rgba(224,40,60,.45);
+    }
+    #stop {
+      padding: .9rem 2rem; font-size: 1rem; color: #e8e8e8;
+      background: #2a2e37;
+    }
+    #log, #loginLog {
+      width: min(90vw, 420px); min-height: 3rem; font-size: .8rem; line-height: 1.5;
+      padding: .75rem 1rem; border-radius: .75rem; background: #171a21;
+      color: #9aa4b2; white-space: pre-wrap; word-break: break-word;
+    }
+
+    /* ---------- Login ---------- */
+    #panel, #login {
+      display: flex; flex-direction: column; align-items: center; gap: 1.25rem;
+      width: 100%;
+    }
+    #login { max-width: min(90vw, 420px); gap: .9rem; }
+    #login .hint { margin: 0; font-size: .82rem; line-height: 1.6; color: #8b95a4; text-align: center; }
+    #login label { display: flex; flex-direction: column; gap: .35rem; width: 100%; font-size: .8rem; color: #9aa4b2; }
+    #login input[type="text"], #login input[type="password"] {
+      width: 100%; padding: .8rem 1rem; font-size: 1rem;
+      border: 1px solid #2a2e37; border-radius: .75rem;
+      background: #171a21; color: #e8e8e8;
+    }
+    #login input:focus { outline: 2px solid #c0182b; outline-offset: 1px; }
+    #login .check { flex-direction: row; align-items: center; gap: .5rem; }
+    #login .check input { accent-color: #c0182b; }
+    #enter {
+      width: 100%; padding: .9rem 1rem; font-size: 1rem; color: #fff;
+      background: #c0182b;
+    }
+    #logout {
+      padding: .55rem 1.1rem; font-size: .78rem; font-weight: 600;
+      color: #8b95a4; background: transparent; border: 1px solid #2a2e37;
+    }
+  </style>
+</head>
+<body>
+  <h1>ALARMA-YA</h1>
+
+  <!-- Login. Shown until a set of credentials actually authenticates. -->
+  <form id="login" hidden autocomplete="on">
+    <p class="hint">
+      Cluster y credencial de publicación de HiveMQ.<br />
+      La credencial solo puede disparar la alarma; no puede escuchar nada.
+    </p>
+    <label>Broker
+      <input id="host" type="text" inputmode="url" autocomplete="off" autocapitalize="off"
+             spellcheck="false" placeholder="tu-cluster.s1.eu.hivemq.cloud" required />
+    </label>
+    <label>Usuario
+      <input id="user" type="text" autocomplete="username" autocapitalize="off" spellcheck="false" required />
+    </label>
+    <label>Contraseña
+      <input id="pass" type="password" autocomplete="current-password" required />
+    </label>
+    <label class="check">
+      <input id="remember" type="checkbox" checked />
+      Recordar en este dispositivo
+    </label>
+    <button id="enter" type="submit">Entrar</button>
+    <div id="loginLog">Ingresá tus credenciales.</div>
+  </form>
+
+  <!-- Trigger panel. Only reachable once connected. -->
+  <div id="panel" hidden>
+    <div class="status">
+      <span id="dot" class="dot"></span>
+      <span id="statusText">Conectando…</span>
+    </div>
+
+    <button id="fire" disabled>ACTIVAR</button>
+    <button id="stop" disabled>Apagar (fallback)</button>
+
+    <div id="log">Iniciando…</div>
+    <button id="logout" type="button">Olvidar credenciales</button>
+  </div>
+
+  <script>
+    // ---------- Configuration ----------
+    // Nothing here is secret. The credentials are NOT in this file by design:
+    // this page runs in the visitor's browser, so anything embedded in it is
+    // readable with "view source". Hardcoding a password here would mean anyone
+    // who finds the URL can fire the siren. The user supplies it at runtime
+    // instead, and the broker itself is what validates it.
+    //
+    // Note this is not an authentication system - there is no server to
+    // authenticate against. The credential IS the HiveMQ publish credential,
+    // and the real containment is that it only has PUBLISH permission: the
+    // worst an attacker can do with it is set off the horn, never listen in.
+    // The broker hostname is not in here either, for a different reason: it is
+    // per-account. Every HiveMQ Cloud cluster has its own, so a hardcoded one
+    // makes this page useless to anyone else while pointing the whole internet
+    // at a single free-tier cluster whose connection quota can be exhausted
+    // from outside. It is asked for once and remembered like the credentials.
+    const CONFIG = {
+      port:  8884,                 // WebSocket TLS port (NOT 8883 — that's raw MQTT for the ESP32)
+      path:  "/mqtt",
+      topic: "alarma-ya/comando"
+    };
+
+    const STORAGE_KEY = "alarma-ya.credentials";
+
+    const $ = (id) => document.getElementById(id);
+    const loginForm = $("login"), panel = $("panel");
+    const hostInput = $("host"), userInput = $("user"), passInput = $("pass");
+    const rememberInput = $("remember");
+    const enterBtn = $("enter"), logoutBtn = $("logout");
+    const dot = $("dot"), statusText = $("statusText");
+    const logBox = $("log"), loginLog = $("loginLog");
+    const fireBtn = $("fire"), stopBtn = $("stop");
+
+    let client = null;
+
+    // An NFC tag points here with ?fire=on. The tap must not be lost while the
+    // user is still logging in, so it is held until the connection is up.
+    let pendingFire = new URLSearchParams(location.search).get("fire") === "on";
+
+    function log(msg) { logBox.textContent = msg; }
+
+    function setOnline(online) {
+      dot.className = "dot " + (online ? "online" : "offline");
+      statusText.textContent = online ? "Conectado" : "Sin conexión";
+      fireBtn.disabled = !online;
+      stopBtn.disabled = !online;
+    }
+
+    // ---------- Credential storage ----------
+    // localStorage can throw outright (private windows, blocked site data), so
+    // every access is guarded and simply degrades to "ask again next time".
+    function loadCredentials() {
+      try {
+        const raw = localStorage.getItem(STORAGE_KEY);
+        return raw ? JSON.parse(raw) : null;
+      } catch (e) { return null; }
+    }
+
+    function saveCredentials(creds) {
+      try { localStorage.setItem(STORAGE_KEY, JSON.stringify(creds)); } catch (e) { /* ignore */ }
+    }
+
+    function forgetCredentials() {
+      try { localStorage.removeItem(STORAGE_KEY); } catch (e) { /* ignore */ }
+    }
+
+    // ---------- Screens ----------
+    function showLogin(message) {
+      loginForm.hidden = false;
+      panel.hidden = true;
+      enterBtn.disabled = false;
+      enterBtn.textContent = "Entrar";
+      if (message) loginLog.textContent = message;
+    }
+
+    function showPanel() {
+      loginForm.hidden = true;
+      panel.hidden = false;
+    }
+
+    // A rejected CONNACK means the credentials are wrong. Retrying on a loop
+    // would just hammer the broker with a password that will never work, so the
+    // client is torn down and the user is sent back to the form.
+    function isAuthError(err) {
+      const code = err && err.code;
+      if (code === 4 || code === 5) return true;
+      const msg = (err && err.message ? err.message : "").toLowerCase();
+      return msg.includes("not authorized") || msg.includes("bad user") || msg.includes("bad username");
+    }
+
+    // ---------- Connect over MQTT-over-WebSocket ----------
+    function connect(creds, { remember }) {
+      const url = `wss://${creds.host}:${CONFIG.port}${CONFIG.path}`;
+
+      client = mqtt.connect(url, {
+        username: creds.username,
+        password: creds.password,
+        clean: true,
+        reconnectPeriod: 2000
+      });
+
+      client.on("connect", () => {
+        // Only persist once the broker has actually accepted them. Saving on
+        // submit would happily store a typo and lock the user out on reload.
+        if (remember) saveCredentials(creds);
+
+        showPanel();
+        setOnline(true);
+        log("Listo para disparar.");
+
+        if (pendingFire) {
+          pendingFire = false;
+          send("ON");
+        }
+      });
+
+      client.on("reconnect", () => { statusText.textContent = "Reconectando…"; });
+      client.on("offline", () => setOnline(false));
+
+      client.on("error", (err) => {
+        if (isAuthError(err)) {
+          client.end(true);
+          client = null;
+          forgetCredentials();
+          passInput.value = "";
+          // The host is left in place: a rejected CONNACK means the broker
+          // answered, so the hostname was right and only the login was wrong.
+          showLogin("Credenciales rechazadas por el broker. Revisalas e intentá de nuevo.");
+          return;
+        }
+        setOnline(false);
+        log("Error: " + err.message);
+      });
+    }
+
+    // ---------- Publish ----------
+    // retain MUST stay false. A retained message is replayed by the broker to
+    // every new subscriber the moment it subscribes, so a retained "ON" would
+    // re-fire the siren on every single ESP32 reconnect, forever. Retain is for
+    // state; this is a command, and a command is an event that already happened.
+    function send(command) {
+      if (!client || !client.connected) { log("No conectado — no se pudo enviar " + command); return; }
+      client.publish(CONFIG.topic, command, { qos: 0, retain: false }, (err) => {
+        log(err ? ("Fallo al enviar " + command + ": " + err.message)
+                : ("Enviado: " + command));
+      });
+    }
+
+    fireBtn.addEventListener("click", () => send("ON"));
+    stopBtn.addEventListener("click", () => send("OFF"));
+
+    loginForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const creds = {
+        // Tolerate a pasted console URL: strip scheme, port and path so
+        // "mqtts://host:8883/" and "host" both end up as the same hostname.
+        host: hostInput.value.trim().replace(/^[a-z]+:\/\//i, "").replace(/[:\/].*$/, ""),
+        username: userInput.value.trim(),
+        password: passInput.value
+      };
+      if (!creds.host || !creds.username || !creds.password) { loginLog.textContent = "Faltan datos."; return; }
+
+      enterBtn.disabled = true;
+      enterBtn.textContent = "Conectando…";
+      loginLog.textContent = "Verificando con el broker…";
+      connect(creds, { remember: rememberInput.checked });
+    });
+
+    logoutBtn.addEventListener("click", () => {
+      forgetCredentials();
+      if (client) { client.end(true); client = null; }
+      hostInput.value = "";
+      userInput.value = "";
+      passInput.value = "";
+      showLogin("Credenciales borradas de este dispositivo.");
+    });
+
+    // ---------- Boot ----------
+    // Saved credentials go straight to the broker so the NFC one-tap still works
+    // after the first login. Without them, the tap lands on the login form and
+    // fires as soon as the connection is accepted.
+    const saved = loadCredentials();
+    if (saved && saved.host && saved.username && saved.password) {
+      hostInput.value = saved.host;
+      userInput.value = saved.username;
+      passInput.value = saved.password;
+      showPanel();
+      setOnline(false);
+      log("Conectando con las credenciales guardadas…");
+      connect(saved, { remember: true });
+    } else {
+      showLogin();
+    }
+  </script>
+</body>
+</html>
