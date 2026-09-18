@@ -54,6 +54,27 @@ only reason port `8884` appears in this project at all. Everything else uses
 Every connection is TLS. HiveMQ Cloud does not accept plaintext, so there is no
 unencrypted variant to fall back to or to forget to turn on.
 
+The ESP32 also **verifies the broker's certificate**, against the root CA bundle
+that ships with the ESP32 core — the same trust list a browser carries.
+Encryption on its own would not be enough, and the reason is worth stating
+plainly: the credentials prove the *device* to HiveMQ, and certificate validation
+is the only thing that proves *HiveMQ* to the device. They point in opposite
+directions. Without the second one, anything able to redirect the traffic can
+present a certificate of its own, read the credentials straight out of the
+CONNECT packet, and from then on decide which commands the siren ever hears —
+including none at all, during a break-in, with the status light still reporting
+"armed".
+
+**That validation needs a real clock**, and this is the part that catches people
+out. Checking a certificate includes asking whether today falls between its two
+dates, and a freshly booted ESP32 believes it is 1 January 1970 — which is
+before every certificate ever issued. So the firmware syncs time over NTP before
+its first handshake and refuses to attempt a connection until the clock is sane.
+
+Which means the device needs **outbound NTP (UDP 123)** on your network, not only
+MQTT. If the board sits on a slow blink forever and the serial log says the clock
+is not synced, that is a blocked port, not a broken broker.
+
 A few details of the device connection, since it is the one that has to stay up
 for years at a time:
 
@@ -434,6 +455,11 @@ Two things to change before it will run:
   network.
 - Set `RELAY_ACTIVE_LOW` to `0`, because Wokwi's relay is active HIGH.
 
+Note that the NTP sync and the certificate validation apply in the simulator
+exactly as they do on hardware, and neither has been re-tested there since
+validation was turned on. If the simulated board never reaches the broker, check
+the clock line in the serial log before assuming anything else is wrong.
+
 Simulate what has **states**: firmware, protocol, reconnection. Calculate what
 has **numbers**: current, power, dissipation. Measure what has **tolerances**:
 the real supply, the real siren, the real relay. Wokwi answers the first
@@ -445,18 +471,24 @@ question only, and no simulator will tell you whether your supply holds up.
 
 Written down rather than hidden, because you are about to trust this thing.
 
-- **TLS certificates are not validated.** `net.setInsecure()` encrypts the
-  traffic but accepts any certificate, so a machine in the network path could
-  impersonate the broker and fire the siren. Pinning the HiveMQ root CA is the
-  fix, and it is not done yet.
 - **The panel stores its credential in `localStorage` in clear text.** Anyone
   holding the unlocked device can read it. The blast radius is bounded by that
   credential being publish-only, but it is a real trade and it was made on
   purpose.
-- **Commands are effectively at-most-once.** The device subscribes at QoS 1, the
-  panel publishes at QoS 0, and MQTT downgrades to the lower of the two.
-- **No delivery confirmation.** The panel reports that it published, not that
-  the siren sounded. There is no acknowledgement topic.
+- **Commands are effectively at-most-once — accepted, not overlooked.** The
+  device subscribes at QoS 1, every publisher sends at QoS 0, and MQTT downgrades
+  to the lower of the two. A QoS 0 publish is lost silently when the connection
+  is already dead but the client does not know it yet, and a phone handing over
+  between WiFi and mobile data is the realistic version of that. It is left as an
+  edge case on purpose: the Android shortcut app exposes no QoS setting at all,
+  so raising it on the web panel alone would make the two triggers behave
+  differently without making the one people actually use any more reliable.
+- **No delivery confirmation.** The panel reports that it published, not that the
+  siren sounded. There is no acknowledgement topic. Together with the point
+  above, treat a tap as a request rather than a guarantee — and confirm by ear.
+- **The device depends on NTP.** Certificate validation needs a real clock, so a
+  network that blocks outbound UDP 123 leaves the alarm permanently
+  disconnected.
 
 ---
 

@@ -4,6 +4,7 @@
 #include <WiFiClientSecure.h>
 #include <PubSubClient.h>
 #include <Ticker.h>
+#include <time.h>
 
 // ---------- Credentials ----------
 // WIFI_AP*_SSID / WIFI_AP*_PASS / MQTT_HOST / MQTT_USER / MQTT_PASS live in
@@ -73,6 +74,46 @@ void ledTick() {
     default:         on = (now / BLINK_WIFI_MS) & 1;                       break;
   }
   digitalWrite(STATUS_LED_PIN, on ? HIGH : LOW);
+}
+
+// ---------- Broker identity ----------
+// The root CA bundle embedded in the ESP32 core: the same trust list a browser
+// carries. Declared here because it is linked in from mbedtls, not from a
+// header.
+extern const uint8_t rootca_crt_bundle_start[] asm("_binary_x509_crt_bundle_start");
+
+// ---------- Clock ----------
+// Validating a certificate means checking, among other things, that today falls
+// between its notBefore and notAfter dates. A freshly booted ESP32 has no clock
+// and believes it is 1 January 1970 - which is before every certificate ever
+// issued, so validation fails against a broker that is perfectly healthy, and it
+// keeps failing forever.
+//
+// This is the step that gets skipped when moving off setInsecure(), and the
+// symptom is indistinguishable from a broken broker. UTC is all that is needed:
+// no timezone and no DST, because nothing on this device displays a local time.
+const char* NTP_SERVER_1 = "pool.ntp.org";
+const char* NTP_SERVER_2 = "time.nist.gov";
+const unsigned long CLOCK_BOOT_TIMEOUT_MS = 20000;
+
+// At or below this is the 1970 default rather than a real reading.
+// 1700000000 is 2023-11-14, comfortably before this firmware existed.
+const time_t CLOCK_SANE_AFTER = 1700000000;
+
+bool clockIsSet() { return time(nullptr) > CLOCK_SANE_AFTER; }
+
+// Only waits - it never gives up on the device's behalf. SNTP keeps retrying in
+// the background whether or not anyone is watching, so a caller that times out
+// can simply come back later and find the clock already set.
+bool waitForClock(unsigned long timeoutMs) {
+  const unsigned long started = millis();
+  while (!clockIsSet() && millis() - started < timeoutMs) delay(200);
+  if (clockIsSet()) {
+    Serial.printf("Clock synced (epoch %ld)\n", (long)time(nullptr));
+    return true;
+  }
+  Serial.println("Clock not synced yet - the TLS handshake cannot succeed until it is");
+  return false;
 }
 
 // ---------- Relay polarity ----------
@@ -226,10 +267,26 @@ void setup() {
   // on a strong nearby one until the day it stops answering.
   Serial.printf(" connected to %s (%d dBm)\n", WiFi.SSID().c_str(), WiFi.RSSI());
 
-  // TODO before this leaves the bench: pin the HiveMQ root CA instead. Skipping
-  // validation still encrypts the traffic, but it accepts any certificate, so a
-  // machine in the network path could impersonate the broker and fire the siren.
-  net.setInsecure();
+  // The clock has to be real before the first handshake, so it is set here
+  // rather than lazily on the first connect attempt.
+  configTime(0, 0, NTP_SERVER_1, NTP_SERVER_2);
+  waitForClock(CLOCK_BOOT_TIMEOUT_MS);
+
+  // Validate the broker's certificate against the root CA bundle shipped with
+  // the ESP32 core.
+  //
+  // This used to be net.setInsecure(), which encrypts the traffic but accepts
+  // ANY certificate. The credentials prove this device to HiveMQ; nothing proved
+  // HiveMQ to this device. Anything able to redirect the traffic could present
+  // its own certificate, read the credentials straight out of the CONNECT
+  // packet, and from then on decide which commands the siren ever hears -
+  // including none at all, during a break-in, with the status light still
+  // reporting "armed".
+  //
+  // The bundle is used rather than a single pinned root deliberately: pinning
+  // one certificate means the alarm stops connecting, silently and permanently,
+  // on the day that authority rotates.
+  net.setCACertBundle(rootca_crt_bundle_start);
   mqtt.setServer(MQTT_HOST, MQTT_PORT);
   mqtt.setCallback(onMessage);
   mqtt.setKeepAlive(60);           // tolerate slow TLS in the simulator (default is 15s)
@@ -258,6 +315,19 @@ void loop() {
       Serial.printf("WiFi back on %s (%d dBm)\n", WiFi.SSID().c_str(), WiFi.RSSI());
     }
     return;                         // nothing else can work until the link is up
+  }
+
+  // No clock, no handshake. Without this gate the device would hammer the broker
+  // with TLS attempts that cannot possibly succeed, and the serial log would
+  // blame the broker for a problem that is entirely local.
+  //
+  // This branch is unreachable while the siren is on: firing requires a message,
+  // a message requires a connection, and a connection already required the
+  // clock. So the wait below can never delay a shutoff.
+  if (!clockIsSet()) {
+    updateLedMode();                // still "broker not reached", which is true
+    waitForClock(2000);
+    return;
   }
 
   if (!mqtt.connected()) connectMqtt();
