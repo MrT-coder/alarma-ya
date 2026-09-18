@@ -343,3 +343,13 @@ Written down rather than hidden, because you are about to trust this thing.
   panel publishes at QoS 0, and MQTT downgrades to the lower of the two.
 - **No delivery confirmation.** The panel reports that it published, not that
   the siren sounded. There is no acknowledgement topic.
+
+---
+
+## License
+
+MIT — see [LICENSE](LICENSE).
+
+Worth reading the last paragraph of it before you build one. This drives 12 V
+and a 130 dB siren, it is published AS IS with no warranty of any kind, and
+what you wire up is your responsibility.
